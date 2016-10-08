@@ -1207,7 +1207,7 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
             readTimeInMBs += readTime;
             forwardTimeInMBs += forwardComputingTime;
             backwardTimeInMBs += backwardComputingTime;
-            updateTimesInMBs += updateTimesInMBs;
+            updateTimesInMBs += parameterUpdateTime;
         }
 
         // aggregation by model averaging or block momentum 
@@ -1290,10 +1290,12 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
                 for (size_t i = 0; i < epochEvalErrors.size(); i++)
                     (epochEvalErrors[i] - epochEvalErrorsLastLogged[i]).LogCriterion(evaluationNodes[i]->NodeName());
 
+                double averageFactor = 1000 / (double)m_numMBsToShowResult;
+
                 fprintf(stderr, ("time = " + GeneratePaddedFloatOrExpFormat(0, 4, totalTimeInMBs) + "s; samplesPerSecond = %.1f\n").c_str(),
                         totalTimeInMBs, trainSamplesSinceLastLogged / totalTimeInMBs);
-                fprintf(stderr, "avgReadTime = %.3f; avgForwardTime = %.3f, avgBackwardTime = %.3f, avgUpdateTime = %.3f\n", 
-                    readTimeInMBs, forwardTimeInMBs, backwardTimeInMBs, updateTimesInMBs);
+                fprintf(stderr, " Overall: avgReadTime = %.2f; avgForwardTime = %.2f, avgBackwardTime = %.2f, avgUpdateTime = %.2f\n", 
+                    readTimeInMBs * averageFactor, forwardTimeInMBs * averageFactor, backwardTimeInMBs * averageFactor, updateTimesInMBs * averageFactor);
             }
 
             // progress tracing for compute cluster management

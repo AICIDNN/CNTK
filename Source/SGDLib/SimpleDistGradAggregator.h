@@ -7,8 +7,6 @@
 #include "TimerUtility.h"
 #include "MatrixQuantizerImpl.h"
 
-#pragma optimize("", off)
-
 namespace Microsoft { namespace MSR { namespace CNTK {
 
 template <class ElemType>
@@ -382,11 +380,6 @@ private:
             m_mpiPerfRecorder.push_back(std::make_pair(dToMCost, "MemcpyDToM"));
             m_mpiPerfRecorder.push_back(std::make_pair(syncCost, "Sync"));
             m_mpiPerfRecorder.push_back(std::make_pair(mToDCost, "MemcpyMToD"));
-
-            //m_mpiPerfRecorder.clear();
-            //m_mpiPerfRecorder.push_back(std::make_pair(dToMWaiting, "MemcpyDToM"));
-            //m_mpiPerfRecorder.push_back(std::make_pair(syncWaiting, "Sync"));
-            //m_mpiPerfRecorder.push_back(std::make_pair(mToDCost, "MemcpyMToD"));
         }
     }
 

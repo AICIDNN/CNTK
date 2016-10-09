@@ -28,6 +28,14 @@ namespace Microsoft { namespace MSR { namespace CNTK {
 
 using namespace std;
 
+void StatisticsResultsExport(std::vector<std::pair<double, std::string>> outputs, std::string title)
+{
+    fprintf(stderr, (" " + title + ": ").c_str());
+    for (auto& output : outputs)
+        fprintf(stderr, "%s = %0.2f; ", output.second, output.first);
+    fprintf(stderr, "\n");
+}
+
 // =======================================================================
 // class SGD
 // =======================================================================
@@ -814,12 +822,18 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
     epochEvalErrors.assign(epochEvalErrors.size(), EpochCriterion(0));
 
     double totalTimeInMBs = 0; // use double since timer has sub-microsecond time resolution
-    double readTimeInMBs = 0;
-    double forwardTimeInMBs = 0;
-    double backwardTimeInMBs = 0;
-    double syncTimesInMBs = 0;
-    double updateTimesInMBs = 0;
-    std::vector<std::pair<double, std::string>> syncUpdateTimes;
+    std::vector<std::pair<double, std::string>> overallTimesInMBs;
+    overallTimesInMBs.push_back(std::make_pair(0, "load"));
+    overallTimesInMBs.push_back(std::make_pair(0, "forward"));
+    overallTimesInMBs.push_back(std::make_pair(0, "backward"));
+    overallTimesInMBs.push_back(std::make_pair(0, "sync"));
+    overallTimesInMBs.push_back(std::make_pair(0, "update"));
+    std::vector<std::pair<double, std::string>> syncTimesInMBs;
+    syncTimesInMBs.push_back(std::make_pair(0, "memcpyDtoH"));
+    syncTimesInMBs.push_back(std::make_pair(0, "sync"));
+    syncTimesInMBs.push_back(std::make_pair(0, "memcpyHtoD"));
+    std::vector<std::unordered_map<int, std::pair<int, double>>> overallHistoStatistics(5);
+    std::vector<std::unordered_map<int, std::pair<int, double>>> syncHistoStatistics(3);
 
     // initialize statistics
     size_t totalEpochSamples = 0;
@@ -951,11 +965,8 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
     {
         // Per-minibatch performance measurements; only enabled when perfTraceLevel > 0
         Timer fineGrainedPerfMeasurementTimer;
-        double readTime = 0;
-        double forwardComputingTime = 0;
-        double backwardComputingTime = 0;
-        double parameterSyncTime = 0;
-        double parameterUpdateTime = 0;
+        std::vector<double> localTimes(5, 0);
+        int localTimeIndicator = 0;
 
         if (m_perfTraceLevel > 0)
             fineGrainedPerfMeasurementTimer.Start();
@@ -971,7 +982,7 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
         if (m_perfTraceLevel > 0)
         {
             fineGrainedPerfMeasurementTimer.Stop();
-            readTime = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
+            localTimes[localTimeIndicator++] = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
             fineGrainedPerfMeasurementTimer.Start();
         }
 
@@ -1052,7 +1063,7 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
                     std::unique_ptr<MatrixComputeStreamEvent> mainStreamSyncEvent(MatrixComputeStreamEvent::Create(net->GetDeviceId()));
                     mainStreamSyncEvent->SynchronizeEvent();
                     fineGrainedPerfMeasurementTimer.Stop();
-                    forwardComputingTime = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
+                    localTimes[localTimeIndicator++] = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
                     fineGrainedPerfMeasurementTimer.Restart();
                 }
 
@@ -1077,7 +1088,7 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
             std::unique_ptr<MatrixComputeStreamEvent> mainStreamSyncEvent(MatrixComputeStreamEvent::Create(net->GetDeviceId()));
             mainStreamSyncEvent->SynchronizeEvent();
             fineGrainedPerfMeasurementTimer.Stop();
-            backwardComputingTime = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
+            localTimes[localTimeIndicator++] = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
             fineGrainedPerfMeasurementTimer.Restart();
         }
 
@@ -1160,7 +1171,7 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
             std::unique_ptr<MatrixComputeStreamEvent> mainStreamSyncEvent(MatrixComputeStreamEvent::Create(net->GetDeviceId()));
             mainStreamSyncEvent->SynchronizeEvent();
             fineGrainedPerfMeasurementTimer.Stop();
-            parameterSyncTime = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
+            localTimes[localTimeIndicator++] = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
             fineGrainedPerfMeasurementTimer.Restart();
         }
 
@@ -1214,24 +1225,17 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
             std::unique_ptr<MatrixComputeStreamEvent> mainStreamSyncEvent(MatrixComputeStreamEvent::Create(net->GetDeviceId()));
             mainStreamSyncEvent->SynchronizeEvent();
             fineGrainedPerfMeasurementTimer.Stop();
-            parameterUpdateTime = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
+            localTimes[localTimeIndicator++] = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
 
             //PREPENDTS(stderr);
             //fprintf(stderr, "Perf trace: Worker MB size = %d, Read = %.5gs; Compute = %.5gs; Parameter update = %.5gs, Aggregate MB size = %d\n", (int)actualMBSize, readTime, computeTime, parameterUpdateTime, (int)aggregateNumSamples);
 
-            readTimeInMBs += readTime;
-            forwardTimeInMBs += forwardComputingTime;
-            backwardTimeInMBs += backwardComputingTime;
-            syncTimesInMBs += parameterSyncTime;
-            updateTimesInMBs += parameterUpdateTime;
-            if (!syncUpdateTimes.size())
-                syncUpdateTimes = m_distGradAgg->GetMpiPerfRecorder();
-            else
-            {
-                int syncIndicator = 0;
-                for (auto& syncUpdateTime : syncUpdateTimes)
-                    syncUpdateTime.first += m_distGradAgg->GetMpiPerfRecorder()[syncIndicator++].first;
-            }
+            localTimeIndicator = 0;
+            for (auto& overallTimeInMBs : overallTimesInMBs)
+                overallTimeInMBs.first = localTimes[localTimeIndicator++];
+            localTimeIndicator = 0;
+            for (auto& syncTimeInMBs : syncTimesInMBs)
+                syncTimeInMBs.first += m_distGradAgg->GetMpiPerfRecorder()[localTimeIndicator++].first;
         }
 
         // aggregation by model averaging or block momentum 
@@ -1257,6 +1261,38 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
 
         totalTimeInMBs += timer.ElapsedSeconds();
         //trainSamplesSinceLastLogged += (int)aggregateNumSamplesWithLabel; // now inside epochCriterionLastLogged
+
+        // statistics
+        if (m_perfTraceLevel > 0 && m_numMBsToShowResult && (numMBsRun * 100) % m_numMBsToShowResult == 0)
+        {
+            double averageFactor = 100000 / (double)m_numMBsToShowResult;
+            int indicator = 0;
+            for (auto& overallTimeInMB : overallTimesInMBs)
+            {
+                double msTime = overallTimeInMB.first * averageFactor;
+                int msIndex = (int)msTime;
+                auto res = overallHistoStatistics[indicator++].insert({ msIndex, std::pair<int, double>(1, msTime) });
+                if (!res.second)
+                {
+                    res.first->second.second = (res.first->second.first * res.first->second.second + msTime) / (res.first->second.first + 1);
+                    res.first->second.first++;
+                }
+                overallTimeInMB.first = 0;
+            }
+            indicator = 0;
+            for (auto& syncTimesInMB : syncTimesInMBs)
+            {
+                double msTime = syncTimesInMB.first * averageFactor;
+                int msIndex = (int)msTime;
+                auto res = syncHistoStatistics[indicator++].insert({ msIndex, std::pair<int, double>(1, msTime) });
+                if (!res.second)
+                {
+                    res.first->second.second = (res.first->second.first * res.first->second.second + msTime) / (res.first->second.first + 1);
+                    res.first->second.first++;
+                }
+                syncTimesInMB.first = 0;
+            }
+        }
 
         // log
         // This shows the criterion since last logged.
@@ -1314,15 +1350,35 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
                 for (size_t i = 0; i < epochEvalErrors.size(); i++)
                     (epochEvalErrors[i] - epochEvalErrorsLastLogged[i]).LogCriterion(evaluationNodes[i]->NodeName());
 
-                double averageFactor = 1000 / (double)m_numMBsToShowResult;
-
                 fprintf(stderr, ("time = " + GeneratePaddedFloatOrExpFormat(0, 4, totalTimeInMBs) + "s; samplesPerSecond = %.1f\n").c_str(),
-                        totalTimeInMBs, trainSamplesSinceLastLogged / totalTimeInMBs);
-                fprintf(stderr, " Overall: avgReadTime = %.2f; avgForwardTime = %.2f, avgBackwardTime = %.2f, avgSyncTime = %0.2f, avgUpdateTime = %.2f\n", 
-                    readTimeInMBs * averageFactor, forwardTimeInMBs * averageFactor, backwardTimeInMBs * averageFactor, syncTimesInMBs * averageFactor, updateTimesInMBs * averageFactor);
-                if (syncUpdateTimes.size())
-                    fprintf(stderr, " Sync: %s = %0.2f, %s = %0.2f, %s = %0.2f\n", syncUpdateTimes[0].second.c_str(), syncUpdateTimes[0].first * averageFactor,
-                        syncUpdateTimes[1].second.c_str(), syncUpdateTimes[1].first * averageFactor, syncUpdateTimes[2].second.c_str(), syncUpdateTimes[2].first * averageFactor);
+                    totalTimeInMBs, trainSamplesSinceLastLogged / totalTimeInMBs);
+
+                std::vector<std::pair<double, std::string>> overallOutput(5);
+                std::vector<std::pair<double, std::string>> syncOutput(3);
+                for (int i = 0; i < overallOutput.size(); i++)
+                {
+                    overallOutput[i].second = overallTimesInMBs[i].second;
+                    int maxCount = 0;
+                    for (auto &histo : overallHistoStatistics[i])
+                    {
+                        if (maxCount >= histo.second.first) continue;
+                        maxCount = histo.second.first;
+                        overallOutput[i].first = histo.second.second;
+                    }
+                }
+                for (int i = 0; i < syncOutput.size(); i++)
+                {
+                    syncOutput[i].second = syncTimesInMBs[i].second;
+                    int maxCount = 0;
+                    for (auto &histo : syncHistoStatistics[i])
+                    {
+                        if (maxCount >= histo.second.first) continue;
+                        maxCount = histo.second.first;
+                        syncOutput[i].first = histo.second.second;
+                    }
+                }
+                StatisticsResultsExport(overallOutput, "Overall");
+                StatisticsResultsExport(syncOutput, "Sync   ");
             }
 
             // progress tracing for compute cluster management
@@ -1340,13 +1396,11 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
             epochEvalErrorsLastLogged = epochEvalErrors;
             numMBsRunSinceLastLogged = numMBsRun;
 
-            totalTimeInMBs = 0;
-            readTimeInMBs = 0;
-            forwardTimeInMBs = 0;
-            backwardTimeInMBs = 0;
-            updateTimesInMBs = 0;
-            syncTimesInMBs = 0;
-            syncUpdateTimes.clear();
+            // TODO clear
+            for(auto& overallHistoStatistic : overallHistoStatistics)
+                overallHistoStatistic.clear();
+            for(auto& syncHistoStatistic : syncHistoStatistics)
+                syncHistoStatistic.clear();
         }
 
         timer.Restart();

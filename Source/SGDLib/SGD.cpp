@@ -30,7 +30,7 @@ using namespace std;
 
 void StatisticsResultsExport(std::vector<std::pair<double, std::string>> outputs, std::string title)
 {
-    fprintf(stderr, (std::string(" " + title + ": ")).c_str());
+    fprintf(stderr, " %s : ", title.c_str());
     for (auto& output : outputs)
         fprintf(stderr, "%s = %0.2f; ", output.second.c_str(), output.first);
     fprintf(stderr, "\n");

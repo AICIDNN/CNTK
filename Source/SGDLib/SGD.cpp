@@ -22,6 +22,8 @@
 #include <map>
 #include <set>
 
+#pragma optimize("", off)
+
 namespace Microsoft { namespace MSR { namespace CNTK {
 
 using namespace std;
@@ -815,7 +817,9 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
     double readTimeInMBs = 0;
     double forwardTimeInMBs = 0;
     double backwardTimeInMBs = 0;
+    double syncTimesInMBs = 0;
     double updateTimesInMBs = 0;
+    std::vector<std::pair<double, std::string>> syncUpdateTimes;
 
     // initialize statistics
     size_t totalEpochSamples = 0;
@@ -950,7 +954,9 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
         double readTime = 0;
         double forwardComputingTime = 0;
         double backwardComputingTime = 0;
+        double parameterSyncTime = 0;
         double parameterUpdateTime = 0;
+
         if (m_perfTraceLevel > 0)
             fineGrainedPerfMeasurementTimer.Start();
 
@@ -1047,7 +1053,7 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
                     mainStreamSyncEvent->SynchronizeEvent();
                     fineGrainedPerfMeasurementTimer.Stop();
                     forwardComputingTime = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
-                    fineGrainedPerfMeasurementTimer.Start();
+                    fineGrainedPerfMeasurementTimer.Restart();
                 }
 
                 // ===========================================================
@@ -1072,7 +1078,7 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
             mainStreamSyncEvent->SynchronizeEvent();
             fineGrainedPerfMeasurementTimer.Stop();
             backwardComputingTime = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
-            fineGrainedPerfMeasurementTimer.Start();
+            fineGrainedPerfMeasurementTimer.Restart();
         }
 
         // for momentum/clipping/regularization/etc., as well as for progress and statistics, we should only count frames that are not gaps
@@ -1149,6 +1155,15 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
                 epochEvalErrors[i] += m_gradHeader->evalErrors[i];
         }
 
+        if (m_perfTraceLevel > 0)
+        {
+            std::unique_ptr<MatrixComputeStreamEvent> mainStreamSyncEvent(MatrixComputeStreamEvent::Create(net->GetDeviceId()));
+            mainStreamSyncEvent->SynchronizeEvent();
+            fineGrainedPerfMeasurementTimer.Stop();
+            parameterSyncTime = fineGrainedPerfMeasurementTimer.ElapsedSeconds();
+            fineGrainedPerfMeasurementTimer.Restart();
+        }
+
         // update model parameters
         if ((aggregateNumSamples > 0) && (learnRatePerSample > m_minLearnRate * 0.01))
         {
@@ -1207,7 +1222,16 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
             readTimeInMBs += readTime;
             forwardTimeInMBs += forwardComputingTime;
             backwardTimeInMBs += backwardComputingTime;
+            syncTimesInMBs += parameterSyncTime;
             updateTimesInMBs += parameterUpdateTime;
+            if (!syncUpdateTimes.size())
+                syncUpdateTimes = m_distGradAgg->GetMpiPerfRecorder();
+            else
+            {
+                int syncIndicator = 0;
+                for (auto& syncUpdateTime : syncUpdateTimes)
+                    syncUpdateTime.first += m_distGradAgg->GetMpiPerfRecorder()[syncIndicator++].first;
+            }
         }
 
         // aggregation by model averaging or block momentum 
@@ -1294,8 +1318,11 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
 
                 fprintf(stderr, ("time = " + GeneratePaddedFloatOrExpFormat(0, 4, totalTimeInMBs) + "s; samplesPerSecond = %.1f\n").c_str(),
                         totalTimeInMBs, trainSamplesSinceLastLogged / totalTimeInMBs);
-                fprintf(stderr, " Overall: avgReadTime = %.2f; avgForwardTime = %.2f, avgBackwardTime = %.2f, avgUpdateTime = %.2f\n", 
-                    readTimeInMBs * averageFactor, forwardTimeInMBs * averageFactor, backwardTimeInMBs * averageFactor, updateTimesInMBs * averageFactor);
+                fprintf(stderr, " Overall: avgReadTime = %.2f; avgForwardTime = %.2f, avgBackwardTime = %.2f, avgSyncTime = %0.2f, avgUpdateTime = %.2f\n", 
+                    readTimeInMBs * averageFactor, forwardTimeInMBs * averageFactor, backwardTimeInMBs * averageFactor, syncTimesInMBs * averageFactor, updateTimesInMBs * averageFactor);
+                if (syncUpdateTimes.size())
+                    fprintf(stderr, " Sync: %s = %0.2f, %s = %0.2f, %s = %0.2f\n", syncUpdateTimes[0].second.c_str(), syncUpdateTimes[0].first * averageFactor,
+                        syncUpdateTimes[1].second.c_str(), syncUpdateTimes[1].first * averageFactor, syncUpdateTimes[2].second.c_str(), syncUpdateTimes[2].first * averageFactor);
             }
 
             // progress tracing for compute cluster management
@@ -1318,6 +1345,8 @@ size_t SGD<ElemType>::TrainOneEpoch(ComputationNetworkPtr net,
             forwardTimeInMBs = 0;
             backwardTimeInMBs = 0;
             updateTimesInMBs = 0;
+            syncTimesInMBs = 0;
+            syncUpdateTimes.clear();
         }
 
         timer.Restart();
